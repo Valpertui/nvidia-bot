@@ -5,6 +5,7 @@ from concurrent.futures.thread import ThreadPoolExecutor
 from datetime import datetime
 from os import path
 from time import sleep
+from random import randrange
 
 import requests
 from chromedriver_py import binary_path  # this will get you the path variable
@@ -26,7 +27,6 @@ from utils.selenium_utils import options, chrome_options
 DIGITAL_RIVER_OUT_OF_STOCK_MESSAGE = "PRODUCT_INVENTORY_OUT_OF_STOCK"
 DIGITAL_RIVER_API_KEY = "9485fa7b159e42edb08a83bde0d83dia"
 DIGITAL_RIVER_PRODUCT_LIST_URL = "https://api.digitalriver.com/v1/shoppers/me/products"
-DIGITAL_RIVER_STOCK_CHECK_URL = "https://api.digitalriver.com/v1/shoppers/me/products/{product_id}/inventory-status?"
 DIGITAL_RIVER_ADD_TO_CART_URL = (
     "https://api.digitalriver.com/v1/shoppers/me/carts/active/line-items"
 )
@@ -47,13 +47,11 @@ DIGITAL_RIVER_PAYMENT_METHODS_API_URL = (
     "https://api.digitalriver.com/v1/shoppers/me/payment-options"
 )
 
-NVIDIA_CART_URL = "https://store.nvidia.com/store/nvidia/en_US/buy/productID.{product_id}/clearCart.yes/nextPage.QuickBuyCartPage"
 NVIDIA_TOKEN_URL = "https://store.nvidia.com/store/nvidia/SessionToken"
 
 GPU_DISPLAY_NAMES = {
     "2060S": "NVIDIA GEFORCE RTX 2060 SUPER",
     "3080": "NVIDIA GEFORCE RTX 3080",
-    "3090": "NVIDIA GEFORCE RTX 3090",
 }
 
 ACCEPTED_LOCALES = [
@@ -164,7 +162,7 @@ autobuy_locale_btns = {
 
 DEFAULT_HEADERS = {
     "Accept": "application/json",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.102 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.102 Safari/537.36",
 }
 CART_SUCCESS_CODES = {201, requests.codes.ok}
 
@@ -178,7 +176,7 @@ class ProductIDChangedException(Exception):
 
 
 class NvidiaBuyer:
-    def __init__(self, gpu, locale="en_us"):
+    def __init__(self, locale="fr_fr"):
         self.product_ids = set([])
         self.cli_locale = locale.lower()
         self.locale = self.map_locales()
@@ -246,6 +244,26 @@ class NvidiaBuyer:
             self.get_product_ids()
             sleep(5)
 
+    def run_items(self):
+        log.info(
+            f"We have {len(self.product_ids)} product IDs for {self.gpu_long_name}"
+        )
+        log.info(f"Product IDs: {self.product_ids}")
+        try:
+            with ThreadPoolExecutor(max_workers=len(self.product_ids)) as executor:
+                product_futures = [
+                    executor.submit(self.buy, product_id)
+                    for product_id in self.product_ids
+                ]
+                concurrent.futures.wait(product_futures)
+                for fut in product_futures:
+                    log.info(fut.result())
+        except ProductIDChangedException as ex:
+            log.warning("Product IDs changed.")
+            self.product_ids = set([])
+            self.get_product_ids()
+            self.run_items()
+
     def has_valid_creds(self):
         if all(item in self.config.keys() for item in AUTOBUY_CONFIG_KEYS):
             return True
@@ -280,25 +298,6 @@ class NvidiaBuyer:
         if response_json["products"].get("nextPage"):
             self.get_product_ids(url=response_json["products"]["nextPage"]["uri"])
 
-    def run_items(self):
-        log.info(
-            f"We have {len(self.product_ids)} product IDs for {self.gpu_long_name}"
-        )
-        log.info(f"Product IDs: {self.product_ids}")
-        try:
-            with ThreadPoolExecutor(max_workers=len(self.product_ids)) as executor:
-                product_futures = [
-                    executor.submit(self.buy, product_id)
-                    for product_id in self.product_ids
-                ]
-                concurrent.futures.wait(product_futures)
-                for fut in product_futures:
-                    log.info(fut.result())
-        except ProductIDChangedException as ex:
-            log.warning("Product IDs changed.")
-            self.product_ids = set([])
-            self.get_product_ids()
-            self.run_items()
 
     def buy(self, product_id, delay=3):
         log.info(f"Checking stock for {product_id} at {delay} second intervals.")
@@ -493,7 +492,7 @@ class NvidiaBuyer:
             log.info("Success submit_cart")
 
     def check_if_locale_corresponds(self, product_id):
-        special_locales = ["en_gb", "de_at", "de_de", "fr_fr", "fr_be"]
+        special_locales = ["fr_fr"]
         if self.cli_locale in special_locales:
             url = f"{DIGITAL_RIVER_PRODUCT_LIST_URL}/{product_id}"
             log.debug(f"Calling {url}")
@@ -516,7 +515,7 @@ class NvidiaBuyer:
             "apiKey": DIGITAL_RIVER_API_KEY,
             "format": "json",
             "locale": self.locale,
-            "currency": "USD",
+            "currency": "EUR",
             "_": datetime.today(),
         }
         response = self.session.get(
