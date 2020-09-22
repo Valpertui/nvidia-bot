@@ -9,5 +9,6 @@ autobuy_config.json
 slack_config.json
 geckodriver.log
 .profile
-*.log
 /autobuy_config.template_json
+*.log
+/evga_config.json

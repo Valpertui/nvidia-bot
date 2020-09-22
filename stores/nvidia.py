@@ -10,7 +10,7 @@ from random import randrange
 import requests
 from chromedriver_py import binary_path  # this will get you the path variable
 from furl import furl
-from requests.adapters import HTTPAdapter
+from requests.exceptions import Timeout
 from requests.packages.urllib3.util.retry import Retry
 from selenium import webdriver
 from selenium.common.exceptions import NoSuchElementException, TimeoutException
@@ -21,6 +21,7 @@ from spinlog import Spinner
 
 from notifications.notifications import NotificationHandler
 from utils import selenium_utils
+from utils.http import TimeoutHTTPAdapter
 from utils.logger import log
 from utils.selenium_utils import options, chrome_options
 
@@ -65,6 +66,8 @@ ACCEPTED_LOCALES = [
     "sv_se",
     "de_at",
     "fr_be",
+    "da_dk",
+    "cs_cz",
 ]
 
 PAGE_TITLES_BY_LOCALE = {
@@ -97,11 +100,11 @@ PAGE_TITLES_BY_LOCALE = {
         "order_completed": "NVIDIA Boutique en ligne - confirmation de commande",
     },
     "it_it": {
-        "signed_in_help": "NVIDIA Online Store - Help",
-        "checkout": "NVIDIA Online Store - Checkout",
-        "verify_order": "NVIDIA Online Store - Verify Order",
-        "address_validation": "NVIDIA Online Store - Address Validation Suggestion Page",
-        "order_completed": "NVIDIA Online Store - Order Completed",
+        "signed_in_help": "NVIDIA Negozio Online - Guida",
+        "checkout": "NVIDIA Negozio Online - Vai alla cassa",
+        "verify_order": "NVIDIA Negozio Online - Verifica ordine",
+        "address_validation": "NVIDIA Negozio Online - Pagina di suggerimento per la validazione dell'indirizzo",
+        "order_completed": "NVIDIA Negozio Online - Ordine completato",
     },
     "nl_nl": {
         "signed_in_help": "NVIDIA Online winkel - Help",
@@ -138,11 +141,18 @@ PAGE_TITLES_BY_LOCALE = {
         "address_validation": "NVIDIA Online Store - Address Validation Suggestion Page",
         "order_completed": "NVIDIA Online Store - Order Completed",
     },
-    "da_dek": {
-        "signed_in_help": "NVIDIA Online-butik - Hjælp",
-        "checkout": "NVIDIA Online-butik - Udcheckning",
-        "verify_order": "NVIDIA Online-Shop - bestellung überprüfen und bestätigen",
-        "address_validation": "NVIDIA Online-Shop - Adressüberprüfung Vorschlagsseite",
+    "da_dk": {
+        "signed_in_help": "NVIDIA Online Store - Help",
+        "checkout": "NVIDIA Online Store - Checkout",
+        "verify_order": "NVIDIA Online Store - Verify Order",
+        "address_validation": "NVIDIA Online Store - Address Validation Suggestion Page",
+        "order_completed": "NVIDIA Online Store - Order Completed",
+    },
+    "cs_cz": {
+        "signed_in_help": "NVIDIA Online Store - Help",
+        "checkout": "NVIDIA Online Store - Checkout",
+        "verify_order": "NVIDIA Online Store - Verify Order",
+        "address_validation": "NVIDIA Online Store - Address Validation Suggestion Page",
         "order_completed": "NVIDIA Online Store - Order Completed",
     },
 }
@@ -158,6 +168,8 @@ autobuy_locale_btns = {
     "de_at": ["Weiter", "Senden"],
     "en_gb": ["Continue Checkout", "submit"],
     "en_us": ["continue", "submit"],
+    "da_dk": ["continue", "submit"],
+    "cs_cz": ["continue", "submit"],
 }
 
 DEFAULT_HEADERS = {
@@ -175,6 +187,13 @@ class ProductIDChangedException(Exception):
         super().__init__("Product IDS changed. We need to re run.")
 
 
+class InvalidAutoBuyConfigException(Exception):
+    def __init__(self, provided_json):
+        super().__init__(
+            f"Check the README and update your `autobuy_config.json` file. Your autobuy config is {json.dumps(provided_json, indent=2)}"
+        )
+
+
 class NvidiaBuyer:
     def __init__(self, gpu, locale="fr_fr"):
         self.product_ids = set([])
@@ -184,17 +203,25 @@ class NvidiaBuyer:
         self.gpu = gpu
         self.enabled = True
         self.auto_buy_enabled = False
+        self.attempt = 0
+        self.started_at = datetime.now()
 
         self.gpu_long_name = GPU_DISPLAY_NAMES[gpu]
 
         if path.exists(AUTOBUY_CONFIG_PATH):
             with open(AUTOBUY_CONFIG_PATH) as json_file:
-                self.config = json.load(json_file)
+                try:
+                    self.config = json.load(json_file)
+                except Exception as e:
+                    log.error("Your `autobuy_config.json` file is not valid json.")
+                    raise e
                 if self.has_valid_creds():
                     self.nvidia_login = self.config["NVIDIA_LOGIN"]
                     self.nvidia_password = self.config["NVIDIA_PASSWORD"]
                     self.auto_buy_enabled = self.config["FULL_AUTOBUY"]
                     self.cvv = self.config.get("CVV")
+                else:
+                    raise InvalidAutoBuyConfigException(self.config)
         else:
             log.info("No Autobuy creds found.")
 
@@ -202,7 +229,7 @@ class NvidiaBuyer:
         if type(self.auto_buy_enabled) != bool:
             self.auto_buy_enabled = False
 
-        adapter = HTTPAdapter(
+        adapter = TimeoutHTTPAdapter(
             max_retries=Retry(
                 total=10,
                 backoff_factor=1,
@@ -275,6 +302,10 @@ class NvidiaBuyer:
             return "de_de"
         if self.cli_locale == "fr_be":
             return "fr_fr"
+        if self.cli_locale == "da_dk":
+            return "en_gb"
+        if self.cli_locale == "cs_cz":
+            return "en_gb"
         return self.cli_locale
 
     def get_product_ids(self, url=DIGITAL_RIVER_PRODUCT_LIST_URL):
@@ -300,27 +331,35 @@ class NvidiaBuyer:
 
 
     def buy(self, product_id):
-        log.info(f"Checking stock for {product_id}.")
-        while not self.add_to_cart(product_id) and self.enabled:
-            randomDelay = (randrange(1000, 3000) / 1000.0)
-            with Spinner.get("Still working...delay : " + str(randomDelay)) as s:
-                sleep(randomDelay)
-        if self.enabled:
-            self.apply_shopper_details()
-            if self.auto_buy_enabled:
-                self.notification_handler.send_notification(
-                    f" {self.gpu_long_name} with product ID: {product_id} available!"
-                )
-                log.info("Auto buy enabled.")
-                # self.submit_cart()
-                self.selenium_checkout()
-            else:
-                log.info("Auto buy disabled.")
-                cart_url = self.open_cart_url()
-                self.notification_handler.send_notification(
-                    f" {self.gpu_long_name} with product ID: {product_id} in stock: {cart_url}"
-                )
-            self.enabled = False
+        try:
+            log.info(f"Checking stock for {product_id}.")
+            while not self.add_to_cart(product_id) and self.enabled:
+                randomDelay = (randrange(1000, 3000) / 1000.0)
+                self.attempt = self.attempt + 1
+                time_delta = str(datetime.now() - self.started_at).split(".")[0]
+                with Spinner.get(
+                    f"Still working (attempt {self.attempt}, have been running for {time_delta})... delay : " + str(randomDelay)
+                ) as s:
+                    sleep(randomDelay)
+            if self.enabled:
+                self.apply_shopper_details()
+                if self.auto_buy_enabled:
+                    self.notification_handler.send_notification(
+                        f" {self.gpu_long_name} with product ID: {product_id} available!"
+                    )
+                    log.info("Auto buy enabled.")
+                    # self.submit_cart()
+                    self.selenium_checkout()
+                else:
+                    log.info("Auto buy disabled.")
+                    cart_url = self.open_cart_url()
+                    self.notification_handler.send_notification(
+                        f" {self.gpu_long_name} with product ID: {product_id} in stock: {cart_url}"
+                    )
+                self.enabled = False
+        except Timeout:
+            log.error("Had a timeout error.")
+            self.buy(product_id)
 
     def open_cart_url(self):
         log.info("Opening cart.")
@@ -369,15 +408,18 @@ class NvidiaBuyer:
         selenium_utils.wait_for_page(
             self.driver, PAGE_TITLES_BY_LOCALE[self.locale]["verify_order"], 5
         )
-        log.info("Submit.")
-        log.debug("Reached order validation page.")
-        self.driver.save_screenshot("nvidia-order-validation.png")
-        self.driver.find_element_by_xpath(f'//*[@value="{autobuy_btns[1]}"]').click()
-        selenium_utils.wait_for_page(
-            self.driver, PAGE_TITLES_BY_LOCALE[self.locale]["order_completed"], 5
-        )
-        self.driver.save_screenshot("nvidia-order-finshed.png")
-        log.info("Done.")
+
+        log.info("F this captcha lmao. Submitting cart.")
+        self.submit_cart()
+        # log.info("Submit.")
+        # log.debug("Reached order validation page.")
+        # self.driver.save_screenshot("nvidia-order-validation.png")
+        # self.driver.find_element_by_xpath(f'//*[@value="{autobuy_btns[1]}"]').click()
+        # selenium_utils.wait_for_page(
+        #     self.driver, PAGE_TITLES_BY_LOCALE[self.locale]["order_completed"], 5
+        # )
+        # self.driver.save_screenshot("nvidia-order-finshed.png")
+        # log.info("Done.")
 
     def address_validation_page(self):
         try:
@@ -397,31 +439,38 @@ class NvidiaBuyer:
             log.error("Address validation not required?")
 
     def add_to_cart(self, product_id):
-        log.debug(f"Checking if item ({product_id}) in stock")
-        params = {
-            "apiKey": DIGITAL_RIVER_API_KEY,
-            "token": self.access_token,
-            "productId": product_id,
-            "format": "json",
-        }
-        response = self.session.post(
-            DIGITAL_RIVER_ADD_TO_CART_API_URL, headers=DEFAULT_HEADERS, params=params
-        )
+        try:
+            log.debug(f"Checking if item ({product_id}) in stock")
+            params = {
+                "apiKey": DIGITAL_RIVER_API_KEY,
+                "token": self.access_token,
+                "productId": product_id,
+                "format": "json",
+            }
+            response = self.session.post(
+                DIGITAL_RIVER_ADD_TO_CART_API_URL,
+                headers=DEFAULT_HEADERS,
+                params=params,
+            )
 
-        if response.status_code == 200:
-            log.info(f"{self.gpu_long_name} ({product_id}) in stock!")
-            return True
-        elif response.status_code == 409:
-            try:
-                response_json = response.json()
-                log.debug(f"Error: {response_json['errors']['error']}")
-                for error in response_json["errors"]["error"]:
-                    if error["code"] == "invalid-product-id":
-                        raise ProductIDChangedException()
-            except json.decoder.JSONDecodeError as er:
-                log.warning(f"Failed to decode json: {response.text}")
-        else:
-            log.debug("item not in stock")
+            if response.status_code == 200:
+                log.info(f"{self.gpu_long_name} ({product_id}) in stock!")
+                return True
+            elif response.status_code == 409:
+                try:
+                    response_json = response.json()
+                    log.debug(f"Error: {response_json['errors']['error']}")
+                    for error in response_json["errors"]["error"]:
+                        if error["code"] == "invalid-product-id":
+                            raise ProductIDChangedException()
+                except json.decoder.JSONDecodeError as er:
+                    log.warning(f"Failed to decode json: {response.text}")
+            else:
+                log.debug("item not in stock")
+                return False
+        except Exception as ex:
+            log.warning(str(ex))
+            log.warning("The connection has been reset.")
             return False
 
     def get_ext_ip(self):
@@ -546,10 +595,12 @@ class NvidiaBuyer:
         if not self.is_signed_in():
             email = selenium_utils.wait_for_element(self.driver, "loginEmail")
             pwd = selenium_utils.wait_for_element(self.driver, "loginPassword")
-
-            email.send_keys(self.nvidia_login)
-            pwd.send_keys(self.nvidia_password)
-
+            try:
+                email.send_keys(self.nvidia_login)
+                pwd.send_keys(self.nvidia_password)
+            except AttributeError as e:
+                log.error("Missing 'nvidia_login' or 'nvidia_password'")
+                raise e
             try:
                 action = ActionChains(self.driver)
                 button = self.driver.find_element_by_xpath(
