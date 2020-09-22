@@ -176,7 +176,7 @@ class ProductIDChangedException(Exception):
 
 
 class NvidiaBuyer:
-    def __init__(self, locale="fr_fr"):
+    def __init__(self, gpu, locale="fr_fr"):
         self.product_ids = set([])
         self.cli_locale = locale.lower()
         self.locale = self.map_locales()
@@ -299,11 +299,12 @@ class NvidiaBuyer:
             self.get_product_ids(url=response_json["products"]["nextPage"]["uri"])
 
 
-    def buy(self, product_id, delay=3):
-        log.info(f"Checking stock for {product_id} at {delay} second intervals.")
+    def buy(self, product_id):
+        log.info(f"Checking stock for {product_id}.")
         while not self.add_to_cart(product_id) and self.enabled:
-            with Spinner.get("Still working...") as s:
-                sleep(delay)
+            randomDelay = (randrange(1000, 3000) / 1000.0)
+            with Spinner.get("Still working...delay : " + str(randomDelay)) as s:
+                sleep(randomDelay)
         if self.enabled:
             self.apply_shopper_details()
             if self.auto_buy_enabled:
