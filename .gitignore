@@ -11,4 +11,9 @@ geckodriver.log
 .profile
 /autobuy_config.template_json
 *.log
+__pycache__/
+*.py[cod]
 /evga_config.json
+*.pkl
+.vscode/
+.github/

@@ -220,6 +220,7 @@ class NvidiaBuyer:
                     self.nvidia_password = self.config["NVIDIA_PASSWORD"]
                     self.auto_buy_enabled = self.config["FULL_AUTOBUY"]
                     self.cvv = self.config.get("CVV")
+                    self.interval=int(self.config.get("INTERVAL", 5))
                 else:
                     raise InvalidAutoBuyConfigException(self.config)
         else:
@@ -242,6 +243,8 @@ class NvidiaBuyer:
         self.notification_handler = NotificationHandler()
 
         log.info("Opening Webdriver")
+        chrome_options = webdriver.ChromeOptions()
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-logging"])
         self.driver = webdriver.Chrome(
             executable_path=binary_path, options=options, chrome_options=chrome_options
         )
@@ -250,7 +253,7 @@ class NvidiaBuyer:
         log.info("Adding driver cookies to session")
 
         log.info("Getting product IDs")
-        self.access_token = self.get_nividia_access_token()
+        self.token_data = self.get_nvidia_access_token()
         self.payment_option = self.get_payment_options()
         if not self.payment_option.get("id") or not self.cvv:
             log.error("No payment option on account or missing CVV. Disable Autobuy")
@@ -271,25 +274,12 @@ class NvidiaBuyer:
             self.get_product_ids()
             sleep(5)
 
-    def run_items(self):
-        log.info(
-            f"We have {len(self.product_ids)} product IDs for {self.gpu_long_name}"
-        )
-        log.info(f"Product IDs: {self.product_ids}")
-        try:
-            with ThreadPoolExecutor(max_workers=len(self.product_ids)) as executor:
-                product_futures = [
-                    executor.submit(self.buy, product_id)
-                    for product_id in self.product_ids
-                ]
-                concurrent.futures.wait(product_futures)
-                for fut in product_futures:
-                    log.info(fut.result())
-        except ProductIDChangedException as ex:
-            log.warning("Product IDs changed.")
-            self.product_ids = set([])
-            self.get_product_ids()
-            self.run_items()
+    @property
+    def access_token(self):
+        if datetime.today().timestamp() >= self.token_data.get("expires_at"):
+            log.debug("Access token expired")
+            self.token_data = self.get_nvidia_access_token()
+        return self.token_data["access_token"]
 
     def has_valid_creds(self):
         if all(item in self.config.keys() for item in AUTOBUY_CONFIG_KEYS):
@@ -315,6 +305,7 @@ class NvidiaBuyer:
             "expand": "product",
             "fields": "product.id,product.displayName,product.pricing",
             "locale": self.locale,
+            "format": "json",
         }
         headers = DEFAULT_HEADERS.copy()
         headers["locale"] = self.locale
@@ -360,6 +351,26 @@ class NvidiaBuyer:
         except Timeout:
             log.error("Had a timeout error.")
             self.buy(product_id)
+
+    def run_items(self):
+        log.info(
+            f"We have {len(self.product_ids)} product IDs for {self.gpu_long_name}"
+        )
+        log.info(f"Product IDs: {self.product_ids}")
+        try:
+            with ThreadPoolExecutor(max_workers=len(self.product_ids)) as executor:
+                product_futures = [
+                    executor.submit(self.buy, product_id)
+                    for product_id in self.product_ids
+                ]
+                concurrent.futures.wait(product_futures)
+                for fut in product_futures:
+                    log.info(fut.result())
+        except ProductIDChangedException as ex:
+            log.warning("Product IDs changed.")
+            self.product_ids = set([])
+            self.get_product_ids()
+            self.run_items()
 
     def open_cart_url(self):
         log.info("Opening cart.")
@@ -469,8 +480,8 @@ class NvidiaBuyer:
                 log.debug("item not in stock")
                 return False
         except Exception as ex:
-            log.warning(str(ex))
-            log.warning("The connection has been reset.")
+            log.debug(str(ex))
+            log.debug("The connection has been reset.")
             return False
 
     def get_ext_ip(self):
@@ -559,21 +570,24 @@ class NvidiaBuyer:
             return self.cli_locale[3:].upper() in response_json["product"]["name"]
         return True
 
-    def get_nividia_access_token(self):
+    def get_nvidia_access_token(self):
         log.debug("Getting session token")
+        now = datetime.today()
         payload = {
             "apiKey": DIGITAL_RIVER_API_KEY,
             "format": "json",
             "locale": self.locale,
             "currency": "EUR",
-            "_": datetime.today(),
+            "_": now,
         }
         response = self.session.get(
             NVIDIA_TOKEN_URL, headers=DEFAULT_HEADERS, params=payload
         )
         log.debug(response.status_code)
-        log.debug(f"Nvidia access token: {response.json()['access_token']}")
-        return response.json()["access_token"]
+        data = response.json()
+        log.debug(f"Nvidia access token: {data['access_token']}")
+        data["expires_at"] = round(now.timestamp() + data["expires_in"]) - 60
+        return data
 
     def is_signed_in(self):
         try:
