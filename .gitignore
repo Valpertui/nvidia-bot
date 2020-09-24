@@ -11,6 +11,7 @@ slack_config.json
 geckodriver.log
 .profile
 /autobuy_config.template_json
+.profile-amz*
 *.log
 __pycache__/
 *.py[cod]

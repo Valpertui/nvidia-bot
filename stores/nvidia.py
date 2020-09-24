@@ -7,7 +7,6 @@ from time import sleep
 from random import randrange
 
 import requests
-from furl import furl
 from requests.exceptions import Timeout
 from requests.packages.urllib3.util.retry import Retry
 from spinlog import Spinner
@@ -20,6 +19,7 @@ NVIDIA_PRODUCT_API = "https://api.nvidia.partners/edge/product/search?page=1&lim
 NVIDIA_CART_URL = "https://store.nvidia.com/store?Action=AddItemToRequisition&SiteID=nvidia&Locale=fr_fr&productID={product_id}&quantity=1"
 NVIDIA_TOKEN_URL = "https://store.nvidia.com/store/nvidia/SessionToken"
 NVIDIA_STOCK_API = "https://api-prod.nvidia.com/direct-sales-shop/DR/products/{locale}/EUR/{product_id}"
+NVIDIA_ADD_TO_CART_API = "https://api-prod.nvidia.com/direct-sales-shop/DR/add-to-cart"
 
 GPU_DISPLAY_NAMES = {
     "2060S": "NVIDIA GEFORCE RTX 2060 SUPER",
@@ -144,8 +144,10 @@ autobuy_locale_btns = {
 }
 
 DEFAULT_HEADERS = {
-    "Accept": "application/json",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.102 Safari/537.36",
+    "referer": "https://www.nvidia.com/",
+    "authority": "api-prod.nvidia.com",
 }
 CART_SUCCESS_CODES = {201, requests.codes.ok}
 
@@ -201,7 +203,6 @@ class NvidiaBuyer:
         self.notification_handler = NotificationHandler()
 
         self.get_product_ids()
-        print(self.product_ids)
 
     def map_locales(self):
         if self.cli_locale == "de_at":
@@ -215,7 +216,10 @@ class NvidiaBuyer:
         return self.cli_locale
 
     def get_product_ids(self):
-        self.product_ids = [PRODUCT_IDS[self.locale][self.gpu]]
+        if isinstance(PRODUCT_IDS[self.locale][self.gpu], list):
+            self.product_ids = PRODUCT_IDS[self.locale][self.gpu]
+        if isinstance(PRODUCT_IDS[self.locale][self.gpu], str):
+            self.product_ids = [PRODUCT_IDS[self.locale][self.gpu]]
 
     def run_items(self):
         log.info(
@@ -241,22 +245,26 @@ class NvidiaBuyer:
         pass
         try:
             log.info(
-                f"Checking stock for {product_id}."
+                f"Attempting to add {product_id}."
             )
-            while not self.is_in_stock(product_id) and self.enabled:
+            cart_success, cart_url = self.get_cart_url(product_id)
+            while not cart_success and self.enabled:
                 randomDelay = (randrange(5000, 8000) / 1000.0)
                 self.attempt = self.attempt + 1
                 time_delta = str(datetime.now() - self.started_at).split(".")[0]
                 with Spinner.get(
-                    f"Still working (attempt {self.attempt}, have been running for {time_delta})... delay : " + str(randomDelay)
+                    f"Adding to cart (attempt {self.attempt}, have been running for {time_delta})..."
                 ) as s:
                     sleep(randomDelay)
+                cart_success, cart_url = self.get_cart_url(product_id)
             if self.enabled:
-                log.info(f"{self.gpu_long_name} is in stock. Go buy it.")
-                cart_url = self.open_cart_url(product_id)
-                self.notification_handler.send_notification(f" {self.gpu_long_name} with product ID: {product_id} in "
-                                                            f"stock: {cart_url}")
+                log.info(f"{self.gpu_long_name} added to cart.")
+                self.notification_handler.send_notification(
+                    f" {self.gpu_long_name} with product ID: {product_id} in "
+                    f"stock: {cart_url}"
+                )
                 self.enabled = False
+                webbrowser.open(cart_url)
         except Timeout:
             log.error("Had a timeout error.")
             self.buy(product_id)
@@ -274,15 +282,44 @@ class NvidiaBuyer:
         else:
             return False
 
-    def open_cart_url(self, product_id):
-        log.info("Opening cart.")
-        params = {
-            "Action": "AddItemToRequisition",
-            "SiteID": "nvidia",
-            "Locale": self.locale,
-            "productID": product_id,
-            "quantity": 1,
-        }
-        url = furl(NVIDIA_CART_URL).set(params)
-        webbrowser.open_new_tab(url.url)
-        return url.url
+    def get_cart_url(self, product_id):
+        success, token = self.get_session_token()
+        if not success:
+            return False, ""
+
+        data = {"products": [{"productId": product_id, "quantity": 1}]}
+        headers = DEFAULT_HEADERS.copy()
+        headers["locale"] = self.locale
+        headers["nvidia_shop_id"] = "8D1992F005EE502ECD2289A7BEC8B9A6"
+        headers["Content-Type"] = "application/json"
+        #headers["challenge"] = "03AGdBq25sBncuytrHJhKyD6oWagCIEAfgt8oYhp4qx37Lq-OpTCTQHvQc4PYNTshX1ANLrGbeuLkfTIEJQYM3CZEYsgpa9ft7CW9nPOh-ceDHrPpZCBTKMdLqnRz1Ci5jbTySnlXKtKG1WpBLM59rvkpHA9-D_ZhtcxBmF36lo7R5PhklCbBAxjiOfUXOFzZ6-iLC_IlWM9Mmt_7A8OwSjcua6-2V1R6Q20HpotYve_9moUg8w7FRbfRam_upOVQLyt5pMYs1uC453nIUbQ-mE5Gvfp8du3JBfysIZD-AuB1EXmCr9y4VTNvXmH_jjgSlQgQeqDoNbnMrfBF5Tohmmpf4GdDfJt6Rrw1qslKwZJGJF9OagZkAWg0q9BDg7kKxRe2SJwIMSmYldJv75RHoy37Wl5M0hHLmMx0wGe6eInOf4vRJS3RAxfqiqqzdP_0lwwORrd0oqNSF4SOmfZwZUtInwpgUPpcgK0KmAJEnCh6ybWlUOvJ-KR6Cz7_JSzCorC7Wunt3SGfx"
+
+        response = self.session.post(
+            url=NVIDIA_ADD_TO_CART_API, headers=headers, data=json.dumps(data)
+        )
+        try:
+            response_json = response.json()
+            if "location" in response_json:
+                return True, response_json["location"]
+            return False, ""
+        except:
+            log.error(response.content)
+            return False, ""
+
+    def get_session_token(self):
+        params = {"format": "json", "locale": self.locale}
+        headers = DEFAULT_HEADERS.copy()
+        headers["locale"] = self.locale
+
+        response = self.session.get(
+            NVIDIA_TOKEN_URL, headers=DEFAULT_HEADERS, params=params
+        )
+        try:
+            response_json = response.json()
+            if "session_token" not in response_json:
+                log.error("Error getting session token.")
+                return False, ""
+            return True, response_json["session_token"]
+        except:
+            log.error("{response.status_code}  {response.content}")
+            return False, ""
