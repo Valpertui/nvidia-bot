@@ -1,4 +1,5 @@
 import json
+import pickle
 from os import path
 from time import sleep
 
@@ -8,8 +9,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.support.ui import WebDriverWait
-
-import pickle
+from selenium.webdriver.common.action_chains import ActionChains
 
 from notifications.notifications import NotificationHandler
 from utils import selenium_utils
@@ -28,13 +28,15 @@ class Evga:
         self.credit_card = {}
         self.card_pn = ""
         self.card_series = ""
+        self.notification_handler = NotificationHandler()
+
         try:
             if path.exists(CONFIG_PATH):
                 with open(CONFIG_PATH) as json_file:
                     config = json.load(json_file)
                     username = config["username"]
                     password = config["password"]
-                    self.card_pn = config["card_pn"]
+                    self.card_pn = config.get("card_pn")
                     self.card_series = config["card_series"]
                     self.credit_card["name"] = config["credit_card"]["name"]
                     self.credit_card["number"] = config["credit_card"]["number"]
@@ -101,7 +103,7 @@ class Evga:
 
         log.info("Logged in!")
 
-    def buy(self, delay=5, test=False, model=""):
+    def buy(self, delay=5, test=False):
         if test:
             log.info("Refreshing Page Until Title Matches ...")
             selenium_utils.wait_for_title(
@@ -121,20 +123,21 @@ class Evga:
 
         log.info("matched chipset=RTX+" + self.card_series + "!")
 
-        # check for card
-        log.info("On GPU list Page")
-        card_btn = self.driver.find_elements_by_xpath(
-            "//a[@href='/products/product.aspx?pn=" + self.card_pn + "']"
-        )
-        while not card_btn:
-            log.debug("Refreshing page for GPU")
-            self.driver.refresh()
+        if self.card_pn and not test:
+            # check for card
+            log.info("On GPU list Page")
             card_btn = self.driver.find_elements_by_xpath(
                 "//a[@href='/products/product.aspx?pn=" + self.card_pn + "']"
             )
-            sleep(delay)
+            while not card_btn:
+                log.debug("Refreshing page for GPU")
+                self.driver.refresh()
+                card_btn = self.driver.find_elements_by_xpath(
+                    "//a[@href='/products/product.aspx?pn=" + self.card_pn + "']"
+                )
+                sleep(delay)
 
-        card_btn[0].click()
+            card_btn[0].click()
 
         #  Check for stock
         log.info("On GPU Page")
@@ -152,6 +155,11 @@ class Evga:
         #  Add to cart
         atc_buttons[0].click()
 
+        # Send notification that product is available
+        self.notification_handler.send_notification(
+            f"📦 Card found in stock at EVGA (P/N {self.card_pn})…"
+        )
+
         #  Go to checkout
         selenium_utils.wait_for_page(self.driver, "EVGA - Checkout")
         selenium_utils.button_click_using_xpath(
@@ -167,7 +175,7 @@ class Evga:
         selenium_utils.wait_for_page(self.driver, "EVGA - Checkout - Billing Options")
 
         log.info("Ensure that we are paying with credit card")
-        sleep(1)  # Fix this.
+        sleep(3)
         WebDriverWait(self.driver, 10).until(
             EC.element_to_be_clickable((By.XPATH, './/input[@value="rdoCreditCard"]'))
         ).click()
@@ -205,6 +213,18 @@ class Evga:
             )
         ).click()
 
+        try:
+            WebDriverWait(self.driver, 10).until(
+                EC.element_to_be_clickable(
+                    (
+                        By.XPATH,
+                        "/html/body/form/div[3]/div[3]/div/div[1]/div[5]/div[3]/div/div[1]/div/div[@id='checkoutButtons']/input[2]",
+                    )
+                )
+            ).click()
+        except:
+            pass
+
         log.info("Finalize Order Page")
         selenium_utils.wait_for_page(self.driver, "EVGA - Checkout - Finalize Order")
 
@@ -212,11 +232,15 @@ class Evga:
             EC.element_to_be_clickable((By.ID, "ctl00_LFrame_cbAgree"))
         ).click()
 
-        selenium_utils.wait_for_element(self.driver, "ctl00_LFrame_btncontinue")
-
         if not test:
             WebDriverWait(self.driver, 10).until(
                 EC.element_to_be_clickable((By.ID, "ctl00_LFrame_btncontinue"))
             ).click()
 
         log.info("Finalized Order!")
+
+        # Send extra notification alerting user that we've successfully ordered.
+        self.notification_handler.send_notification(
+            f"🎉 Order submitted at EVGA for {self.card_pn}",
+            audio_file="purchase.mp3",
+        )
