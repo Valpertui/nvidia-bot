@@ -54,6 +54,13 @@ class ProductIDChangedException(Exception):
         super().__init__("Product IDS changed. We need to re run.")
 
 
+class InvalidAutoBuyConfigException(Exception):
+    def __init__(self, provided_json):
+        super().__init__(
+            f"Check the README and update your `autobuy_config.json` file. Your autobuy config is {json.dumps(provided_json, indent=2)}"
+        )
+
+
 PRODUCT_IDS_FILE = "stores/store_data/nvidia_product_ids.json"
 PRODUCT_IDS = json.load(open(PRODUCT_IDS_FILE))
 
@@ -77,7 +84,14 @@ class NvidiaBuyer:
         if type(self.auto_buy_enabled) != bool:
             self.auto_buy_enabled = False
 
-        adapter = TimeoutHTTPAdapter()
+        adapter = TimeoutHTTPAdapter(
+            max_retries=Retry(
+                total=10,
+                backoff_factor=1,
+                status_forcelist=[429, 500, 502, 503, 504],
+                method_whitelist=["HEAD", "GET", "OPTIONS"],
+            )
+        )
         self.session.mount("https://", adapter)
         self.session.mount("http://", adapter)
         self.notification_handler = NotificationHandler()
@@ -123,14 +137,17 @@ class NvidiaBuyer:
 
     def buy(self, product_id):
         try:
-            log.info(f"Stock Check {product_id} at {self.interval} second intervals.")
+            log.info(
+                f"Attempting to add {product_id}."
+            )
             while not self.is_in_stock(product_id):
+                randomDelay = (randrange(1000, 5000) / 1000.0)
                 self.attempt = self.attempt + 1
                 time_delta = str(datetime.now() - self.started_at).split(".")[0]
                 with Spinner.get(
                     f"Stock Check ({self.attempt}, have been running for {time_delta})..."
                 ) as s:
-                    sleep(self.interval)
+                    sleep(randomDelay)
             if self.enabled:
                 cart_success, cart_url = self.get_cart_url(product_id)
                 if cart_success:
